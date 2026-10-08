@@ -1,0 +1,18 @@
+<!doctype html><html><head><meta charset="utf-8"><script src="vendor/pdf.min.js"></script></head>
+<body><title>PENDING</title><script>
+if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc="vendor/pdf.worker.min.js";
+(async()=>{
+  try{
+    const r=await fetch("/v1/evidence/sp0/pdf?dataset_id=6101b004ba4011f1b8ee3f9c7e9efa67&document_id=6c35facaba4011f1b8ee3f9c7e9efa67",{headers:{"X-RT-Token":"local-dev"}});
+    const buf=await r.arrayBuffer();
+    const pdf=await pdfjsLib.getDocument({data:buf,cMapUrl:"vendor/cmaps/",cMapPackaged:true,standardFontDataUrl:"vendor/standard_fonts/"}).promise;
+    const page=await pdf.getPage(1);
+    const vp=page.getViewport({scale:1});
+    const cv=document.createElement("canvas"); cv.width=vp.width; cv.height=vp.height;
+    await page.render({canvasContext:cv.getContext("2d"),viewport:vp}).promise;
+    const d=cv.getContext("2d").getImageData(0,0,cv.width,cv.height).data;
+    let dark=0; for(let i=0;i<d.length;i+=4){ if((d[i]+d[i+1]+d[i+2])/3<128) dark++; }
+    document.title="DARK="+dark;
+  }catch(e){ document.title="ERR="+e.message.slice(0,60); }
+})();
+</script></body></html>

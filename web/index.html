@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>ResumeTrace · 简历筛选</title>
+<style>
+:root{--navy:#1a3c6e;--ok:#0a7a5a;--warn:#a05a00;--bad:#a00}
+*{box-sizing:border-box}
+body{font-family:-apple-system,"PingFang SC",sans-serif;margin:0;background:#f2f4f7;color:#222;font-size:14px}
+header{background:var(--navy);color:#fff;padding:10px 20px;display:flex;gap:14px;align-items:center}
+header b{font-size:16px} header .muted{color:#bcd;font-size:12px}
+#searchPane{max-width:860px;margin:18px auto;padding:0 16px}
+textarea{width:100%;height:90px;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:13px}
+button{background:var(--navy);color:#fff;border:0;border-radius:8px;padding:8px 18px;cursor:pointer;font-size:14px}
+button.ghost{background:#fff;color:var(--navy);border:1px solid var(--navy)}
+button.mini{background:#fff;color:var(--navy);border:1px solid #bcd;padding:2px 10px;font-size:12px;border-radius:6px}
+#cards{max-width:860px;margin:14px auto;padding:0 16px;display:grid;gap:10px}
+.card{background:#fff;border:1px solid #e2e6eb;border-radius:10px;padding:12px 16px;cursor:pointer}
+.card:hover{border-color:var(--navy)}
+.card h3{margin:0 0 4px;font-size:15px}
+.card .verdict{font-size:13px;color:#333}
+.card .score{float:right;color:var(--navy);font-weight:600}
+#reportView{display:none;position:fixed;inset:0;background:#f2f4f7;z-index:5}
+#reportView .top{background:var(--navy);color:#fff;padding:8px 16px;display:flex;gap:12px;align-items:center}
+#split{display:flex;height:calc(100% - 44px)}
+#left{width:44%;overflow:auto;padding:16px 18px;background:#fafbfc;border-right:1px solid #d8dde3}
+#right{width:56%;overflow:auto;background:#525659;padding:12px;display:flex;flex-direction:column;align-items:center}
+.verdictBox{background:#fff;border:1px solid #e2e6eb;border-radius:10px;padding:12px 16px;margin-bottom:12px}
+.verdictBox .v{font-size:16px;font-weight:700}
+.verdictBox .v.ok{color:var(--ok)}.verdictBox .v.mid{color:var(--warn)}.verdictBox .v.bad{color:#666}
+.verdictBox .muted{color:#777;font-size:12px;margin-top:4px}
+h3.sec{font-size:14px;margin:14px 0 6px;color:#335}
+.point{background:#fff;border:1px solid #e2e6eb;border-radius:8px;padding:8px 12px;margin:6px 0;font-size:13.5px}
+.point .st{font-weight:600}
+.point .st.ok{color:var(--ok)}.point .st.warn{color:var(--warn)}.point .st.no{color:#888}.point .st.bad{color:var(--bad)}
+.point .jd{color:#555;display:block;margin:2px 0 4px}
+.q{background:#fff8ec;border:1px solid #f0dcb8;border-radius:8px;padding:7px 11px;font-size:13px;margin:6px 0}
+details{background:#fff;border:1px solid #e2e6eb;border-radius:8px;margin:10px 0;padding:6px 12px;font-size:12.5px}
+summary{cursor:pointer;color:#567}
+table{width:100%;border-collapse:collapse;font-size:12px}
+td,th{border:1px solid #e6e9ee;padding:4px 6px;text-align:left}
+#right .hint{color:#cfd3d8;font-size:12.5px;margin:8px}
+#right canvas{margin:8px 0;box-shadow:0 2px 10px rgba(0,0,0,.4)}
+.spin{color:#ffd766;font-size:13px;margin:10px}
+</style>
+</head>
+<body>
+<header><b>ResumeTrace</b><span class="muted">简历初筛 · 结论可点回原文 · 合成数据演示 · 界面版 2026-09-27d</span></header>
+
+<div id="searchPane">
+  <label>简历库
+    <select id="dsDir" style="padding:6px 10px;border:1px solid #ccc;border-radius:8px;font-size:13px;min-width:320px">
+      <option value="">加载中…</option>
+    </select>
+  </label>
+  <label style="margin-left:10px;font-size:13px;color:#666">Dataset ID
+    <input id="ds" size="38" value="6101b004ba4011f1b8ee3f9c7e9efa67" style="padding:6px 10px;border:1px solid #ccc;border-radius:8px;font-size:13px">
+  </label>
+  <textarea id="q">职位名称:应用架构师(风控平台方向)
+任职要求:1. 本科及以上学历,5年以上金融行业软件开发经验;2. 3年以上风控平台、交易平台或相关方向的项目开发与架构经验;3. 精通Java或C/C++;4. 熟悉流批处理技术,如Flink、Spark;5. 有实时风控或交易类流批项目经验者优先;
+岗位职责:负责风控平台方向的应用架构设计,主导技术方案设计与评审。</textarea>
+  <button onclick="startSearch()">开始筛选</button>
+  <button class="ghost" onclick="loadLast()">打开上次的结果</button>
+  <span id="prog" class="muted" style="margin-left:10px"></span>
+</div>
+<div id="cards"></div>
+
+<div id="reportView">
+  <div class="top"><button class="ghost" onclick="backToList()">← 返回</button>
+    <b id="rvTitle"></b><span class="muted" id="rvMeta"></span></div>
+  <div id="split"><div id="left"></div><div id="right"><div class="hint">点左侧"看原文",这里显示简历原页并框出证据</div></div></div>
+</div>
+
+<script>
+const API="http://localhost:8000", TOKEN="local-dev";
+const WORD={SUPPORTED:["满足","ok"],PARTIAL:["部分满足","warn"],NOT_EVIDENCED:["简历没写","no"],NEEDS_REVIEW:["待确认","warn"],CONFLICTING:["原文冲突","bad"]};
+const CAT_LABEL={required:"硬性要求",preferred:"加分项",search_intent:"搜索意图",clarify:"待澄清",responsibility:"岗位职责"};
+let timer=null, curPdf=null, curRep=null, pdfLoading=null, curSid=null;
+async function call(p,o={}){const r=await fetch(API+p,Object.assign({headers:{"X-RT-Token":TOKEN,"Content-Type":"application/json"}},o));
+  if(!r.ok) throw new Error((await r.json().catch(()=>({}))).message||("HTTP "+r.status));return r.json();}
+async function loadDirConfig(){
+  try{
+    const cfg=await call("/v1/config");
+    const sel=document.getElementById("dsDir");
+    sel.innerHTML="";
+    if(!cfg.allowed_import_dirs||!cfg.allowed_import_dirs.length){
+      sel.innerHTML='<option value="">未配置导入目录</option>'; return;
+    }
+    cfg.allowed_import_dirs.forEach(d=>{
+      const opt=document.createElement("option");
+      opt.value=d.path;
+      opt.textContent=`${d.path} (${d.pdf_count} 份PDF${d.exists?"":" · 目录不存在"})`;
+      sel.appendChild(opt);
+    });
+    const saved=localStorage.getItem("last_import_dir");
+    if(saved) sel.value=saved;
+    sel.onchange=()=>localStorage.setItem("last_import_dir",sel.value);
+  }catch(e){
+    document.getElementById("dsDir").innerHTML='<option value="">配置加载失败</option>';
+  }
+}
+loadDirConfig();
+function esc(s){return (s||"").replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]))}
+
+function verdictOf(rep){
+  const req=rep.items.filter(i=>i.category==="required"||i.category==="search_intent");
+  const sup=req.filter(i=>i.state==="SUPPORTED").length;
+  const conf=rep.items.some(i=>i.state==="CONFLICTING");
+  const pendReq=req.filter(i=>i.state==="NEEDS_REVIEW").length;
+  const pendOther=rep.items.filter(i=>i.state==="NEEDS_REVIEW"&&i.category!=="required"&&i.category!=="search_intent").length;
+  const pendingTotal=pendReq+pendOther;
+  if(conf) return {cls:"bad",text:"原文有冲突,先人工核对再决定"};
+  if(req.length&&sup===req.length&&!pendReq) return {cls:"ok",text:`建议进入复核:硬性要求 ${sup}/${req.length} 条都有原文证据`};
+  if(sup>0) return {cls:"mid",text:`可进入复核,先确认 ${pendingTotal+req.length-sup-pendReq} 处(硬性要求 ${sup}/${req.length} 条有原文证据)`};
+  return {cls:"bad",text:"建议暂缓:硬性要求缺少原文证据"};
+}
+function pointLine(it){
+  const [w,cls]=WORD[it.state]||[it.state,"no"];
+  const frag=(it.input_fragments||[])[0]||"(要求)";
+  const idx=curRep.items.indexOf(it);
+  const cites=(it.citations||[]).slice(0,2)
+    .map(c=>`<button class="mini" onclick="showCite(${idx},${it.citations.indexOf(c)})">看原文 p${c.page}</button>`).join(" ");
+  const ev=(it.citations||[])[0];
+  const catLabel=CAT_LABEL[it.category]||it.category;
+  return `<div class="point"><span class="st ${cls}">${w}</span> <span style="color:#888;font-size:12px">[${catLabel}]</span>
+    <span class="jd">要求:${esc(frag)}</span>
+    ${ev?`<span class="jd" style="color:#234">简历:第 ${ev.page} 页 "${esc(ev.quote.slice(0,64))}${ev.quote.length>64?"…":""}"</span>`:'<span class="jd" style="color:#888">简历:未找到可定位原文</span>'}
+    ${cites}
+    ${it.review_question?`<div class="q" style="margin-top:6px">❓ ${esc(it.review_question)}</div>`:""}</div>`;
+}
+
+async function startSearch(){
+  prog.textContent="提交中…";
+  try{
+    const {search_id}=await call("/v1/searches",{method:"POST",body:JSON.stringify({dataset_id:ds.value.trim(),query_text:q.value,limit:20})});
+    localStorage.setItem("last_search",search_id);
+    prog.textContent=`已开始筛选:拆条件 → 检索简历 → 逐人核对原文。第一份约 2-4 分钟,之后每 1-2 分钟出一张卡片,此页自动刷新`;
+    if(timer) clearInterval(timer);
+    timer=setInterval(()=>poll(search_id),4000); poll(search_id);
+  }catch(e){ prog.textContent="启动失败:"+e.message; }
+}
+async function loadLast(){
+  let sid=localStorage.getItem("last_search");
+  if(timer){clearInterval(timer);timer=null;}   // 手动画到历史结果时停掉当前自动刷新
+  try{
+    const list=(await call("/v1/searches"))||[];
+    const cur=sid?(list||[]).find(x=>x.search_id===sid):null;
+    const usable=x=>x&&((x.status==="running"&&x.live)||(x.report_count>0));
+    if(!usable(cur)){const best=list.find(x=>x.report_count>0); if(best) sid=best.search_id;}
+  }catch(e){}
+  if(sid){prog.textContent="正在加载历史筛选结果…"; const st=await poll(sid);
+    if(st==="running"&&!timer){timer=setInterval(()=>poll(sid),4000);}
+  } else prog.textContent="没有历史结果";
+}
+function plainErr(st){
+  const s=st.toLowerCase();
+  if(s.includes("quota_exceeded")||s.includes("403")) return "模型账号当日额度已用完(DashScope 侧限制)。已出的报告仍可查看;要跑完请换 API key 或等次日额度恢复。";
+  if(s.includes("timed out")||s.includes("connection")) return "RAGFlow 服务没有响应(容器可能刚重启)。等容器起来后重跑一次即可,已出的报告仍可查看。";
+  if(s.includes("未解析出")) return "这段要求没拆出可用的条件,请补一句像 JD 的任职要求。";
+  if(st.startsWith("interrupted")) return "服务端重启,这个任务被中断了。已有的报告仍可查看。";
+  return st.replace(/^failed:\s*/,"").slice(0,200);
+}
+async function poll(sid){
+  curSid=sid;
+  let s; try{ s=await call("/v1/searches/"+sid); }catch(e){ prog.textContent="查询失败:"+e.message; return "error"; }
+  const ready=(s.progress&&s.progress.ready)||[];
+  const st=String(s.search.status);
+  const stage=(s.progress&&s.progress.stage)?(" · "+s.progress.stage):"";
+  prog.textContent=`已出 ${ready.length}/${s.progress&&s.progress.total||"…"} 人 · ${st.startsWith("failed")?"失败:"+st.slice(0,60):st}${stage}`;
+  let html=ready.map(r=>{
+    const fit=r.analysis_summary&&r.analysis_summary.fit_level||"";
+    const next=r.analysis_summary&&r.analysis_summary.next_step||"";
+    const fitColor={"强匹配":"#0a7a5a","中等匹配":"#a05a00","弱匹配":"#888","不匹配":"#a00"}[fit]||"#888";
+    return `<div class="card" onclick="openReport('${r.report_id}')">
+      <span class="score">证据分 ${r.score}</span><h3>${r.candidate}</h3>
+      <div class="verdict">${fit?`<span style="color:${fitColor};font-weight:600">${esc(fit)}</span> · `:""}${esc(next||r.verdict_text||"")}</div></div>`;
+  }).join("");
+  if(st==="running"&&!ready.length) html=`<div class="card"><h3>${esc((s.progress&&s.progress.stage)||'进行中')}…</h3><div class="verdict">已出 0 份(共 ${s.progress&&s.progress.total||'?'} 人),判完一个人就多一张卡片,不用等全部跑完。</div><div style="margin-top:8px"><button class="mini" onclick="loadLast()">先看上一次跑完的结果</button></div></div>`;
+  if(st!=="running"){
+    clearInterval(timer);timer=null;
+    if(st.startsWith("failed")||st.startsWith("interrupted"))
+      html=`<div class="card" style="border-left:4px solid #a00"><h3>这次筛选中断了</h3><div class="verdict">${esc(plainErr(st))}</div><div style="margin-top:8px"><button class="mini" onclick="loadLast()">打开最近一次跑完的结果</button></div></div>`+html;
+    else if(!ready.length)
+      html='<div class="card"><h3>这次搜索没有产出报告</h3><div class="verdict">输入为空、任务被中断或服务端失败。</div><div style="margin-top:8px"><button class="mini" onclick="loadLast()">载入最近一次有结果的分析</button></div></div>';
+  }
+  cards.innerHTML=html;
+  return st;
+}
+async function openReport(rid){
+  curRep=await call("/v1/reports/"+rid);
+  reportView.style.display="block"; curPdf=null; pdfLoading=null;
+  rvTitle.textContent=curRep.candidate.filename.replace(/\.pdf$/,"");
+  rvMeta.textContent="";
+  right.innerHTML='<div class="hint">点左侧"看原文",这里显示简历原页并框出证据</div>';
+  const v=verdictOf(curRep);
+  const pref=curRep.items.filter(i=>i.category==="preferred"&&i.state==="SUPPORTED");
+  const analysis=curRep.analysis||{};
+  const fit=analysis.role_fit||{};
+  const recs=analysis.recommendations||{};
+  const strengths=analysis.strengths||[];
+  const risks=analysis.risks||[];
+  const commQs=analysis.communication_questions||[];
+  left.innerHTML=`<div class="verdictBox"><div class="v ${v.cls}">${v.text}</div>
+      <div class="muted">证据匹配分 ${curRep.score.score}/100 · 覆盖率 ${curRep.score.coverage_pct||0}%</div></div>
+    ${analysis.overall_assessment?`<h3 class="sec">顾问评估</h3><div class="point" style="background:#f8f9fb">${esc(analysis.overall_assessment)}</div>`:""}
+    ${fit.fit_level?`<div class="point"><b>匹配度:</b> ${esc(fit.fit_level)} ${fit.explanation?"— "+esc(fit.explanation):""}</div>`:""}
+    ${recs.next_step?`<div class="point"><b>建议:</b> ${esc(recs.next_step)}</div>`:""}
+    ${strengths.length?`<h3 class="sec">优势</h3>`+strengths.map(s=>`<div class="point"><span class="st ok">✓</span> <span class="jd">${esc(s.point||"")}</span>${s.evidence?`<span class="jd" style="color:#234">依据: ${esc(s.evidence.slice(0,80))}</span>`:""}</div>`).join(""):""}
+    ${risks.length?`<h3 class="sec">风险/疑虑</h3>`+risks.map(r=>`<div class="point"><span class="st warn">!</span> <span class="jd">${esc(r.point||"")}</span>${r.reason?`<span class="jd" style="color:#888">原因: ${esc(r.reason.slice(0,80))}</span>`:""}</div>`).join(""):""}
+    ${commQs.length?`<h3 class="sec">建议沟通问题</h3>`+commQs.map(q=>`<div class="q"><b>${esc(q.priority||"中")}</b> ${esc(q.question||"")}${q.purpose?`<div style="color:#888;font-size:12px;margin-top:2px">目的: ${esc(q.purpose.slice(0,60))}</div>`:""}</div>`).join(""):""}
+    <h3 class="sec">逐条对照</h3>`+
+    curRep.items.filter(i=>i.category!=="responsibility").map(pointLine).join("")+
+    (pref.length?`<h3 class="sec">加分项</h3>`+pref.map(i=>`<div class="point"><span class="st ok">有</span> <span class="jd">${esc((i.input_fragments||[])[0]||"")}</span></div>`).join(""):"")+
+    `<h3 class="sec">沟通笔记与版本</h3>
+    <div id="noteArea"></div>
+    <button class="mini" onclick="toggleNote()">+ 记录沟通笔记</button>
+    <div id="noteForm" style="display:none;margin:8px 0">
+      <select id="noteType"><option>候选人自述</option><option>顾问观察</option><option>外部材料</option></select>
+      <textarea id="noteText" style="height:60px" placeholder="例:电话确认其风控平台项目确为本人主导,2021.03 起…"></textarea>
+      <button class="mini" onclick="saveNote()">保存并生成报告新版本</button>
+    </div>
+    <div id="verBox" class="muted"></div>`+
+    (curRep.criteria?`<details><summary>条件调整(可修改后重跑)</summary>
+      <div id="critEdit"></div>
+      <button class="mini" onclick="rerunRefine()">按修改后的条件重跑(前 5 人)</button></details>`
+     :`<details><summary>系统理解的条件</summary><div class="muted">该报告未带条件列表,重跑搜索后可编辑</div></details>`);
+  renderNoteArea(); renderVersions(); renderCritEdit();
+  const firstIdx=curRep.items.findIndex(i=>(i.citations||[]).length);
+  if(firstIdx>=0) showCite(firstIdx,0);
+  else showResumePage(1);
+}
+async function renderVersions(){
+  try{
+    const list=await call(`/v1/candidates/${curRep.candidate.candidate_id}/reports`);
+    const mine=(curSid? list.filter(v=>v.search_id===curSid) : list);
+    verBox.innerHTML=mine.length>1?`本次筛选的报告版本:${mine.map(v=>`<button class="mini" onclick="openReport('${v.report_id}')">v${v.version}</button>`).join(" ")}`:"";
+  }catch(e){ verBox.innerHTML=""; }
+}
+function renderNoteArea(){
+  const na=document.getElementById("noteArea");
+  na.innerHTML=(curRep.notes||[]).map(n=>`<div class="q">[${esc(n.label||n.source_type)}] ${esc(n.text)}</div>`).join("");
+}
+function toggleNote(){ const f=document.getElementById("noteForm"); f.style.display=f.style.display==="none"?"block":"none"; }
+async function saveNote(){
+  const text=document.getElementById("noteText").value.trim();
+  if(!text){ alert("先写笔记内容"); return; }
+  try{
+    const r=await call(`/v1/candidates/${curRep.candidate.candidate_id}/notes`,{method:"POST",
+      body:JSON.stringify({text, source_type:document.getElementById("noteType").value, search_id:curSid||null})});
+    document.getElementById("noteText").value="";
+    if(r.report_id) await openReport(r.report_id); else renderVersions();
+  }catch(e){ alert("保存失败:"+e.message); }
+}
+function renderCritEdit(){
+  const box=document.getElementById("critEdit"); if(!box||!curRep.criteria) return;
+  const catLabel={required:"硬性要求",preferred:"加分项",search_intent:"搜索意图",clarify:"待澄清",responsibility:"岗位职责"};
+  box.innerHTML=curRep.criteria.map((c,i)=>`<div class="point">
+    <select id="ce_cat_${i}">${["required","preferred","search_intent","clarify","responsibility"].map(x=>`<option value="${x}" ${x===c.category?"selected":""}>${catLabel[x]||x}</option>`).join("")}</select>
+    <input id="ce_w_${i}" type="number" step="0.5" min="0" value="${c.weight}" style="width:60px" title="权重">
+    <span class="jd">${esc((c.expression&&c.expression.predicate)||"条件"+(i+1))}${c.min_duration_months?` ≥${c.min_duration_months}月`:""}</span></div>`).join("");
+}
+async function rerunRefine(){
+  if(!curSid){ alert("缺少搜索上下文,请从列表进入"); return; }
+  const crit=curRep.criteria.map((c,i)=>Object.assign({},c,{
+    category:document.getElementById("ce_cat_"+i).value,
+    weight:parseFloat(document.getElementById("ce_w_"+i).value||"1")}));
+  try{
+    const r=await call(`/v1/searches/${curSid}/refine`,{method:"POST",
+      body:JSON.stringify({criteria:crit, base_search_id:curSid, limit:5})});
+    backToList(); prog.textContent="已按修改条件重跑,正在筛选前 5 人…";
+    if(timer) clearInterval(timer);
+    timer=setInterval(()=>poll(r.search_id),4000); poll(r.search_id);
+  }catch(e){ alert("重跑失败:"+e.message); }
+}
+function pngUrl(c){ return `${API}/v1/evidence/${c.span_id||"sp0"}/png?filename=${encodeURIComponent(curRep.candidate.filename||"")}`; }
+async function showCite(i,j){
+  const c=curRep.items[i].citations[j];
+  if(!curRep.candidate.filename){ right.innerHTML='<div class="hint">该报告缺少文件名,无法定位原文件</div>'; return; }
+  right.innerHTML='<div class="spin">加载简历原页…</div>';
+  try{
+    const r=await fetch(pngUrl(c),{headers:{"X-RT-Token":TOKEN}});
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    const blob=await r.blob();
+    if(!blob.type.includes("image")) throw new Error("返回非图片");
+    const img=new Image();
+    await new Promise((res,rej)=>{ img.onload=res; img.onerror=()=>rej(new Error("图片解码失败")); img.src=URL.createObjectURL(blob); });
+    img.style.maxWidth="100%"; img.style.boxShadow="0 2px 10px rgba(0,0,0,.4)"; img.style.margin="8px 0"; img.style.background="#fff";
+    right.innerHTML="";
+    const tag=document.createElement("div"); tag.className="hint";
+    tag.textContent=`第 ${c.page} 页 · ${c.label} · "${c.quote.slice(0,46)}…"`;
+    right.appendChild(tag); right.appendChild(img);
+  }catch(e){
+    right.innerHTML=`<div class="hint">原页加载失败:${esc(e.message)} <button class="mini" onclick="showCite(${i},${j})">重试</button></div>`;
+  }
+}
+async function showResumePage(pageNum){
+  if(!curRep.candidate.filename){ right.innerHTML='<div class="hint">该报告缺少文件名</div>'; return; }
+  right.innerHTML='<div class="spin">加载简历原文…</div>';
+  try{
+    const url=`${API}/v1/resume/page/png?filename=${encodeURIComponent(curRep.candidate.filename)}&page=${pageNum}`;
+    const r=await fetch(url,{headers:{"X-RT-Token":TOKEN}});
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    const blob=await r.blob();
+    if(!blob.type.includes("image")) throw new Error("返回非图片");
+    const img=new Image();
+    await new Promise((res,rej)=>{ img.onload=res; img.onerror=()=>rej(new Error("图片解码失败")); img.src=URL.createObjectURL(blob); });
+    img.style.maxWidth="100%"; img.style.boxShadow="0 2px 10px rgba(0,0,0,.4)"; img.style.margin="8px 0"; img.style.background="#fff";
+    right.innerHTML="";
+    const tag=document.createElement("div"); tag.className="hint";
+    tag.textContent=`第 ${pageNum} 页 · 简历原文`;
+    right.appendChild(tag); right.appendChild(img);
+  }catch(e){
+    right.innerHTML=`<div class="hint">简历加载失败:${esc(e.message)}</div>`;
+  }
+}
+function backToList(){reportView.style.display="none";}
+</script>
+</body>
+</html>

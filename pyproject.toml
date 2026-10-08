@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resumetrace"
+version = "0.1.0"
+description = "Evidence-based resume screening with deterministic scoring and low-hallucination guarantees"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Zhang Guangtao", email = "zhangguangtao@example.com"}
+]
+keywords = ["resume", "screening", "recruitment", "evidence-based", "llm", "rag"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.0",
+    "requests>=2.31.0",
+    "pyyaml>=6.0.1",
+    "pypdfium2>=4.25.0",
+    "Pillow>=10.1.0",
+    "pypdf>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.11.0",
+    "ruff>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/resumetrace/resumetrace"
+Repository = "https://github.com/resumetrace/resumetrace"
+Issues = "https://github.com/resumetrace/resumetrace/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["server*"]
+
+[tool.black]
+line-length = 120
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

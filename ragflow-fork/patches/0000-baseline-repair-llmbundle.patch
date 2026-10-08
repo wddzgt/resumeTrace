@@ -1,0 +1,16 @@
+--- a/rag/app/resume.py
++++ b/rag/app/resume.py
+@@ -1054,8 +1054,12 @@
+     try:
+         from api.db.services.llm_service import LLMBundle
+         from common.constants import LLMType
++        from api.db.joint_services.tenant_model_service import get_tenant_default_model_by_type
+ 
+-        llm = LLMBundle(tenant_id, LLMType.CHAT, lang=lang)
++        # v0.27.2 upstream bug: LLMBundle expects a model-config dict, but this
++        # call site passes the LLMType.CHAT string, so every extraction crashed
++        # with TypeError and silently fell back to basic-info-only chunks.
++        llm = LLMBundle(tenant_id, get_tenant_default_model_by_type(tenant_id, LLMType.CHAT), lang=lang)
+ 
+         for attempt in range(_LLM_MAX_RETRIES + 1):
+             try:

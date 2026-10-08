@@ -1,0 +1,50 @@
+{
+  "jd_id": "J10034",
+  "source_url": "https://www.zhaopin.com/jobdetail/CC274328810J40940439608.htm",
+  "source_name": "中信期货 应用架构师(风控平台方向)",
+  "accessed_at": "2026-09-26",
+  "reviewed_by": "人工审定(条件结构已核对;招聘页状态可能变化,测试以本文件为准)",
+  "synthetic": false,
+  "raw_text": "职位名称:应用架构师(风控平台方向)\n任职要求:\n1. 本科及以上学历,计算机、软件等相关专业,5年以上金融行业软件开发经验;\n2. 3年以上风控平台、交易平台或相关方向的项目开发与架构经验;\n3. 精通Java或C/C++,具备扎实的系统设计与编码能力;\n4. 熟悉流批处理技术,如Flink、Spark,了解实时计算与离线计算的融合架构;\n5. 有实时风控或交易类流批项目经验者优先;\n6. 具备良好的沟通能力和团队协作精神。\n岗位职责:\n1. 负责风控平台方向的应用架构设计,主导技术方案设计与评审;\n2. 负责实时风控链路的性能与稳定性优化;\n3. 参与制定研发规范,指导团队成员完成关键模块开发。",
+  "expected_criteria": [
+    {
+      "category": "required",
+      "summary": "5年以上金融行业软件开发经验",
+      "min_duration_months": 60,
+      "note": "总相关行业年限,与方向年限是两类条件"
+    },
+    {
+      "category": "required",
+      "summary": "3年以上风控/交易平台方向经验",
+      "min_duration_months": 36,
+      "note": "特定方向年限"
+    },
+    {
+      "category": "required",
+      "summary": "Java 或 C/C++",
+      "expression_op": "OR",
+      "note": "OR 关系,只会其一不得否决"
+    },
+    {
+      "category": "required",
+      "summary": "流批处理技术能力",
+      "examples": ["Flink", "Spark"],
+      "note": "Flink/Spark 位于'如'之后,是示例不是硬条件"
+    },
+    {
+      "category": "preferred",
+      "summary": "实时风控或交易类流批项目经验",
+      "note": "'优先',不进硬门槛、不进百分制分母"
+    },
+    {
+      "category": "responsibility",
+      "summary": "主导技术方案设计与评审",
+      "note": "岗位职责;不得为候选人生成'曾主导风控Flink项目'硬条件"
+    }
+  ],
+  "forbidden_criteria": [
+    "近三年主导 Flink 风控项目",
+    "必须使用 Flink",
+    "金融风控 Flink 项目经验(硬条件形式)"
+  ]
+}

@@ -1,0 +1,9 @@
+# ResumeTrace dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+requests>=2.31.0
+pyyaml>=6.0.1
+pypdfium2>=4.25.0
+Pillow>=10.1.0
+pypdf>=3.0.0

@@ -1,0 +1,88 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# Data and logs
+data/
+*.db
+*.sqlite3
+logs/
+*.log
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# RAGFlow
+deploy/ragflow-logs/
+deploy/ragflow-data/
+
+# Generated files
+web/vendor/*.min.js.map
+*.png
+!docs/images/*.png
+
+# Generated evaluation artifacts (rerun with eval/runner/*; only the summary reports are committed)
+eval/results/*
+!eval/results/EVAL_REPORT.md
+!eval/results/B0_BASELINE_REPORT.md
+!eval/results/p5_compare/
+eval/results/p5_compare/*
+!eval/results/p5_compare/summary.json
+
+# Temporary
+tmp/
+temp/
+*.tmp
+
+# Local tool files
+MEMORY.md
+
+# Local config (use .example instead)
+configs/resumetrace.yaml
+
+# Runtime files from start.sh
+.resumetrace.log
+.resumetrace.pid

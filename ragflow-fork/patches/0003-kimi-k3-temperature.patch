@@ -1,0 +1,15 @@
+--- a/rag/llm/chat_model.py
++++ b/rag/llm/chat_model.py
+@@ -252,6 +252,12 @@
+                 enable_thinking,
+                 "extra_body.chat_template_kwargs.enable_thinking",
+             )
++
++    # ResumeTrace patch 0003: DashScope-hosted kimi-k3 rejects any explicit
++    # temperature (probe: only omitted/1 accepted; 0.9/0.1 -> 400).
++    if "kimi-k3" in model_name_lower:
++        sanitized_gen_conf.pop("temperature", None)
++        sanitized_kwargs.pop("temperature", None)
+ 
+     if backend == "base":
+         return sanitized_gen_conf, sanitized_kwargs

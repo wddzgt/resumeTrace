@@ -1,0 +1,342 @@
+--- a/rag/app/resume.py
++++ b/rag/app/resume.py
+@@ -1054,8 +1054,12 @@
+     try:
+         from api.db.services.llm_service import LLMBundle
+         from common.constants import LLMType
++        from api.db.joint_services.tenant_model_service import get_tenant_default_model_by_type
+ 
+-        llm = LLMBundle(tenant_id, LLMType.CHAT, lang=lang)
++        # v0.27.2 upstream bug: LLMBundle expects a model-config dict, but this
++        # call site passes the LLMType.CHAT string, so every extraction crashed
++        # with TypeError and silently fell back to basic-info-only chunks.
++        llm = LLMBundle(tenant_id, get_tenant_default_model_by_type(tenant_id, LLMType.CHAT), lang=lang)
+ 
+         for attempt in range(_LLM_MAX_RETRIES + 1):
+             try:
+@@ -1358,6 +1362,9 @@
+                     desc = _extract_description_from_range(desc_lines, lines, company=company, position=position)
+                     if desc.strip():
+                         work_descs.append(desc.strip())
++                # ResumeTrace evidence mode: keep the line-range pointer so chunks can
++                # carry real source spans instead of synthetic coordinates.
++                work_exp_details[-1]["desc_lines"] = desc_lines if isinstance(desc_lines, list) and len(desc_lines) == 2 else None
+ 
+             if companies:
+                 resume["corp_nm_tks"] = companies
+@@ -1433,6 +1440,8 @@
+             projects = project_exp["projectExperience"]
+             project_names = []
+             project_descs = []
++            # ResumeTrace evidence mode: per-project details with line-range pointers.
++            project_exp_details = []
+             for proj in projects:
+                 name = proj.get("project_name", "")
+                 if name:
+@@ -1443,11 +1452,22 @@
+                     desc = _extract_description_from_range(desc_lines, lines, company=name, position=proj.get("role", ""))
+                     if desc.strip():
+                         project_descs.append(desc.strip())
++                project_exp_details.append(
++                    {
++                        "project_name": name,
++                        "role": proj.get("role", ""),
++                        "start_date": proj.get("start_date", ""),
++                        "end_date": proj.get("end_date", ""),
++                        "desc_lines": desc_lines if isinstance(desc_lines, list) and len(desc_lines) == 2 else None,
++                    }
++                )
+ 
+             if project_names:
+                 resume["project_tks"] = project_names
+             if project_descs:
+                 resume["project_desc_tks"] = project_descs
++            if project_exp_details:
++                resume["_project_exp_details"] = project_exp_details
+             logger.info(f"Project experience extraction succeeded: {len(projects)} entries")
+ 
+         if not resume.get("name_kwd"):
+@@ -1791,7 +1811,7 @@
+ # ==================== Phase 4: Post-processing Pipeline ====================
+ 
+ 
+-def _postprocess_resume(resume: dict, lines: list[str], lang: str = "Chinese") -> dict:
++def _postprocess_resume(resume: dict, lines: list[str], lang: str = "Chinese", evidence_mode: bool = False) -> dict:
+     """
+     Four-phase post-processing pipeline (ref: SmartResume Section 3.2.3)
+ 
+@@ -1993,7 +2013,9 @@
+     project_descs = resume.get("project_desc_tks", [])
+     # Save pre-merge project descriptions for debugging
+     resume["_raw_project_descs"] = list(project_descs) if project_descs else []
+-    if project_descs:
++    # ResumeTrace evidence mode: merging project descs into work descs destroys the
++    # work/project scope boundary that evidence attribution relies on, so keep them split.
++    if project_descs and not evidence_mode:
+         project_names = resume.get("project_tks", [])
+         merged_count = 0
+         skipped_count = 0
+@@ -2061,8 +2083,131 @@
+ # ==================== Pipeline Orchestration & Chunk Construction ====================
+ 
+ 
+-def parse_resume(filename: str, binary: bytes, tenant_id, lang: str = "Chinese") -> tuple[dict, list[str], list[dict]]:
++def _build_evidence(resume: dict, lines: list[str], line_positions: list[dict], binary: bytes, lang: str = "Chinese") -> dict:
++    """ResumeTrace evidence mode: build scope/span structures with REAL source positions.
++
++    Spans come from the line-range pointers (desc_lines) produced during extraction;
++    they are never reverse-matched from generated chunk text. A span whose line range
++    is out of bounds or lacks coordinates is dropped, leaving its scope unlocated
++    instead of receiving synthetic coordinates.
+     """
++    import hashlib as _hashlib
++
++    n = len(lines)
++    spans: list[dict] = []
++    scopes: list[dict] = []
++    counter = {"sp": 0, "sc": 0}
++
++    def _norm(s):
++        return _normalize_for_comparison(s or "")
++
++    def _find_line(text):
++        t = _norm(text)
++        if not t:
++            return None
++        for i, ln in enumerate(lines):
++            if t and t in _norm(ln):
++                return i
++        return None
++
++    def _make_span(start, end):
++        if not (isinstance(start, int) and isinstance(end, int) and 0 <= start <= end < n):
++            return None
++        rects = [line_positions[j] for j in range(start, min(end, len(line_positions) - 1) + 1)]
++        if not rects or any(not isinstance(r, dict) or "page" not in r for r in rects):
++            return None
++        quote = "\n".join(lines[start:end + 1])
++        span = {
++            "id": f"sp{counter['sp']}",
++            "line_start": start,
++            "line_end": end,
++            "rects": rects,
++            "quote": quote,
++            "quote_hash": _hashlib.sha256(_norm(quote).encode("utf-8")).hexdigest(),
++            "status": "located",
++        }
++        counter["sp"] += 1
++        spans.append(span)
++        return span
++
++    def _make_scope(kind, **kw):
++        scope = {"id": f"sc{counter['sc']}", "kind": kind, "source_span_ids": [], "parent_scope_id": None}
++        scope.update(kw)
++        counter["sc"] += 1
++        scopes.append(scope)
++        return scope
++
++    def _attach(scope, header_text, desc_lines):
++        hdr = _find_line(header_text)
++        if hdr is not None:
++            sp = _make_span(hdr, hdr)
++            if sp:
++                scope["source_span_ids"].append(sp["id"])
++        if isinstance(desc_lines, list) and len(desc_lines) == 2:
++            sp = _make_span(desc_lines[0], desc_lines[1])
++            if sp:
++                scope["source_span_ids"].append(sp["id"])
++
++    profile = _make_scope("profile")
++    name_line = _find_line(resume.get("name_kwd", ""))
++    if name_line is not None:
++        sp = _make_span(name_line, name_line)
++        if sp:
++            profile["source_span_ids"].append(sp["id"])
++
++    edu = _make_scope("education")
++    schools = resume.get("school_name_tks") or []
++    if schools:
++        edu["organization"] = schools[0]
++    edu_lines = [i for i in (_find_line(s) for s in schools) if i is not None]
++    if edu_lines:
++        sp = _make_span(min(edu_lines), max(edu_lines))
++        if sp:
++            edu["source_span_ids"].append(sp["id"])
++
++    work_scopes = []
++    for detail in resume.get("_work_exp_details", []):
++        scope = _make_scope(
++            "work",
++            organization=detail.get("company", ""),
++            role=detail.get("position", ""),
++            start_date=detail.get("start_date", ""),
++            end_date=detail.get("end_date", ""),
++        )
++        _attach(scope, detail.get("company", ""), detail.get("desc_lines"))
++        work_scopes.append(scope)
++
++    project_scopes = []
++    for detail in resume.get("_project_exp_details", []):
++        scope = _make_scope(
++            "project",
++            project_name=detail.get("project_name", ""),
++            role=detail.get("role", ""),
++            start_date=detail.get("start_date", ""),
++            end_date=detail.get("end_date", ""),
++        )
++        _attach(scope, detail.get("project_name", ""), detail.get("desc_lines"))
++        project_scopes.append(scope)
++
++    try:
++        mode = "metadata" if _extract_metadata_text(binary) else "OCR"
++    except Exception:
++        mode = "unknown"
++    for sp in spans:
++        sp["extraction_mode"] = mode
++
++    return {
++        "spans": spans,
++        "scopes": scopes,
++        "work_scope_ids": [s["id"] for s in work_scopes],
++        "project_scope_ids": [s["id"] for s in project_scopes],
++        "profile_scope_id": profile["id"],
++        "education_scope_id": edu["id"],
++    }
++
++
++def parse_resume(filename: str, binary: bytes, tenant_id, lang: str = "Chinese", evidence_mode: bool = False) -> tuple[dict, list[str], list[dict]]:
++    """
+     Resume parsing pipeline orchestration function
+ 
+     Execution flow:
+@@ -2099,12 +2244,16 @@
+         resume = parse_with_regex(plain_text, lang)
+ 
+     # Phase 4: Post-processing pipeline
+-    resume = _postprocess_resume(resume, lines, lang)
++    resume = _postprocess_resume(resume, lines, lang, evidence_mode=evidence_mode)
+ 
++    # ResumeTrace evidence mode: attach scope/span evidence built from real line positions
++    if evidence_mode:
++        resume["_evidence"] = _build_evidence(resume, lines, line_positions, binary, lang)
++
+     return resume, lines, line_positions
+ 
+ 
+-def _build_chunk_document(filename: str, resume: dict, lang: str = "Chinese") -> list[dict]:
++def _build_chunk_document(filename: str, resume: dict, lang: str = "Chinese", evidence: dict | None = None) -> list[dict]:
+     """
+     Build a list of document chunks from structured resume information
+ 
+@@ -2173,7 +2322,49 @@
+ 
+     # List fields that need per-element splitting (each experience/project generates a separate chunk to avoid oversized merged chunks)
+     _SPLIT_LIST_FIELDS = {"work_desc_tks", "project_desc_tks"}
++
++    # ResumeTrace evidence mode: scope lookup so every chunk carries its experience
++    # scope and real source spans instead of synthetic coordinates.
++    ev = evidence if evidence is not None else resume.get("_evidence")
++    scope_by_id: dict = {}
++    work_scope_seq: list = []
++    project_scope_seq: list = []
++    profile_scope_id = education_scope_id = None
++    if ev:
++        scope_by_id = {s["id"]: s for s in ev.get("scopes", [])}
++        work_scope_seq = [scope_by_id[i] for i in ev.get("work_scope_ids", []) if i in scope_by_id]
++        project_scope_seq = [scope_by_id[i] for i in ev.get("project_scope_ids", []) if i in scope_by_id]
++        profile_scope_id = ev.get("profile_scope_id")
++        education_scope_id = ev.get("education_scope_id")
++
++    _PROFILE_GROUP_TITLES = {"Basic Info", "Skills & Certificates", "Work Overview", "基本信息", "技能与证书", "工作概况"}
++    _EDUCATION_GROUP_TITLES = {"Education", "教育背景"}
+ 
++    def _span_rects(scope):
++        rects = []
++        for sp_id in scope.get("source_span_ids", []):
++            sp = next((s for s in ev["spans"] if s["id"] == sp_id), None)
++            if sp:
++                rects.extend([[r["page"], r["x0"], r["x1"], r["top"], r["bottom"]] for r in sp["rects"]])
++        return rects
++
++    def _tag(ck, scope):
++        if not ev or scope is None:
++            return
++        ck["resume_scope_id_kwd"] = scope["id"]
++        ck["resume_scope_kind_kwd"] = scope["kind"]
++        if scope.get("source_span_ids"):
++            ck["resume_source_ref_id_kwd"] = list(scope["source_span_ids"])
++            ck["resume_span_status_kwd"] = "located"
++            first = next((s for s in ev["spans"] if s["id"] == scope["source_span_ids"][0]), None)
++            if first:
++                ck["resume_span_quote_ltks"] = first["quote"]
++            rects = _span_rects(scope)
++            if rects:
++                ck["_rt_rects"] = rects
++        else:
++            ck["resume_span_status_kwd"] = "unlocated"
++
+     # Basic info field set: these fields should be merged into one chunk to avoid splitting name, phone, email, etc.
+     _BASIC_INFO_FIELDS = {
+         "name_kwd",
+@@ -2285,6 +2476,11 @@
+                     pass
+             else:
+                 chunk[fk] = str(fv)
++        if ev:
++            if group_title in _PROFILE_GROUP_TITLES:
++                _tag(chunk, scope_by_id.get(profile_scope_id))
++            elif group_title in _EDUCATION_GROUP_TITLES:
++                _tag(chunk, scope_by_id.get(education_scope_id))
+         chunks.append(chunk)
+ 
+     # Iterate over field map, generating a chunk for each non-merged field with a value
+@@ -2357,6 +2553,11 @@
+ 
+                 # Tokenization result for current segment
+                 chunk[field_key] = rag_tokenizer.tokenize(item_text)
++                if ev:
++                    if field_key == "work_desc_tks":
++                        _tag(chunk, work_scope_seq[idx] if idx < len(work_scope_seq) else None)
++                    else:
++                        _tag(chunk, project_scope_seq[idx] if idx < len(project_scope_seq) else None)
+                 chunks.append(chunk)
+             continue
+ 
+@@ -2437,8 +2638,15 @@
+     from rag.nlp import add_positions
+ 
+     for i, ck in enumerate(chunks):
+-        # All chunks placed on page=0, top increments by index to ensure logical ordering
+-        add_positions(ck, [[0, 0, 0, i, i]])
++        # ResumeTrace evidence mode: chunks with validated source spans keep the real
++        # PDF rectangles; only span-less chunks fall back to logical ordering coords
++        # (and are flagged resume_span_status_kwd=unlocated by _tag).
++        rects = ck.pop("_rt_rects", None)
++        if rects:
++            add_positions(ck, rects)
++        else:
++            # All chunks placed on page=0, top increments by index to ensure logical ordering
++            add_positions(ck, [[0, 0, 0, i, i]])
+ 
+     return chunks
+ 
+@@ -2509,12 +2717,17 @@
+         callback(0.1, "Starting resume parsing...")
+         rag_tokenizer.tokenizer.set_language(lang)
+ 
++        # ResumeTrace evidence mode: per-dataset parser_config flag, or deploy-wide
++        # env switch. Default off keeps upstream behaviour byte-identical.
++        parser_config = kwargs.get("parser_config") or {}
++        evidence_mode = bool(parser_config.get("evidence_mode")) or os.environ.get("RESUMETRACE_EVIDENCE_MODE") == "1"
++
+         # Parse resume
+-        resume, lines, line_positions = parse_resume(filename, binary, tenant_id, lang)
++        resume, lines, line_positions = parse_resume(filename, binary, tenant_id, lang, evidence_mode=evidence_mode)
+         callback(0.6, "Resume structured extraction complete")
+ 
+         # Build document chunks (with coordinate info)
+-        chunks = _build_chunk_document(filename, resume, lang)
++        chunks = _build_chunk_document(filename, resume, lang, evidence=resume.get("_evidence") if evidence_mode else None)
+         callback(0.9, f"Document chunk construction complete, {len(chunks)} chunks total")
+ 
+         callback(1.0, "Resume parsing complete")

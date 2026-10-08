@@ -1,0 +1,38 @@
+--- a/rag/llm/embedding_model.py
++++ b/rag/llm/embedding_model.py
+@@ -255,6 +255,20 @@
+ 
+     def encode_queries(self, text: str):
+         return self._model.encode_queries(text)
++
++
++def _openai_embed_batch_size() -> int:
++    """ResumeTrace: batch ceiling for OpenAI-compatible embedding endpoints.
++
++    Upstream hard-codes 16 (OpenAI's own limit). DashScope compatible-mode
++    rejects batches >10, which made multi-chunk documents fail parsing with
++    HTTP 400. Deployments opt in via RAGFLOW_EMBED_BATCH_SIZE; default keeps
++    upstream behaviour.
++    """
++    try:
++        return max(1, int(os.environ.get("RAGFLOW_EMBED_BATCH_SIZE", "16")))
++    except ValueError:
++        return 16
+ 
+ 
+ class OpenAIEmbed(Base):
+@@ -280,10 +294,12 @@
+ 
+     def encode(self, texts: list):
+         # OpenAI requires batch size <=16; 8191 is the documented per-input token ceiling.
+-        return self._batched_encode(texts, self._call, batch_size=16, truncate_to=8191)
++        # ResumeTrace: OpenAI-compatible providers such as DashScope cap batches
++        # at 10; see _openai_embed_batch_size().
++        return self._batched_encode(texts, self._call, batch_size=_openai_embed_batch_size(), truncate_to=8191)
+ 
+     def encode_queries(self, text):
+-        vectors, token_count = self._batched_encode([text], self._call, batch_size=16, truncate_to=8191)
++        vectors, token_count = self._batched_encode([text], self._call, batch_size=_openai_embed_batch_size(), truncate_to=8191)
+         return vectors[0], token_count
+ 
+ 

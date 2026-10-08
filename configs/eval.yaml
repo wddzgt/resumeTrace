@@ -1,0 +1,11 @@
+# 评测验收阈值(规格第 10 节:验收目标,非运行参数)
+thresholds:
+  recall_at_20: ">= baseline_B0"
+  cross_scope_false_support_drop: ">= 50%"
+  text_pdf_span_precision: ">= 0.95"
+  text_pdf_span_coverage: ">= 0.90"
+  unsupported_positive_sentences: "== 0"
+  jd_condition_regression: "JD-01..JD-04 + NL-01 全过"
+performance:
+  retrieval_p95_ratio_vs_baseline: "<= 2.0"
+ocr_subset: report_separately      # OCR 精确率/覆盖率不混入文本型指标

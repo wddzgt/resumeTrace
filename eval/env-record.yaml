@@ -1,0 +1,20 @@
+machine:
+  cpu_gpu: "Apple M4 Pro (arm64, Rosetta 运行 amd64 镜像)"
+  memory_gb: 24
+  os: "macOS (darwin arm64)"
+docker:
+  ragflow_image: "docker.m.daocloud.io/infiniflow/ragflow:v0.27.2"
+  desktop_memory_gb: 12
+  es_mem_limit_gb: 4
+models:
+  chat_llm: "qwen3.8-27b (DashScope compatible-mode; 前期 deepseek-v4.1-flash 配额耗尽后切换)"
+  embedding: "text-embedding-v4 (batch=10 via RAGFLOW_EMBED_BATCH_SIZE)"
+  reranker: ""
+index:
+  es_version: "8.11.3"
+  mapping_modified: false
+patches: [0000-baseline-repair-llmbundle, 0001-embedding-batch-configurable, 0002-evidence-mode]
+test:
+  date: "2026-09-27"
+  concurrency: 1
+  dataset_size: 20

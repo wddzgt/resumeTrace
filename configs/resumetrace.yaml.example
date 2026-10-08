@@ -1,0 +1,21 @@
+# ResumeTrace 配套服务配置
+# 复制本文件为 resumetrace.yaml 并修改路径以匹配本地环境
+allowed_import_dirs:
+  - /path/to/your/resume/library
+local_pdf_dir: /path/to/your/resume/library
+sqlite_path: ./data/resumetrace.db
+evidence_mode: true
+
+import_limits:
+  max_files_per_batch: 200
+  max_file_mb: 20
+  allowed_extensions: [".pdf"]
+
+search:
+  limit_default: 20
+  limit_max: 20
+  auto_report_top_n: 20
+
+logging:
+  redact_pii: true                 # 日志不记电话/邮箱/简历正文
+  record_fields: [file_id, sha256, status, elapsed_ms]
