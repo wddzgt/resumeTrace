@@ -101,7 +101,7 @@ def generate_candidate_analysis(
         resume_content=resume_content,
     )
 
-    raw = llm_call("", prompt)
+    raw = llm_call("你是招聘顾问分析助手,只输出合法JSON。", prompt)
     cleaned = re.sub(r"^```(json)?|```$", "", raw.strip(), flags=re.M)
     try:
         analysis = json.loads(cleaned)
@@ -205,8 +205,10 @@ def _validate_analysis(analysis: dict, score: dict) -> dict:
     fit = analysis.get("role_fit", {}).get("fit_level", "")
     if score_val == 0 and coverage <= 50 and fit in ("中等匹配", "强匹配"):
         analysis["role_fit"]["fit_level"] = "弱匹配"
-    elif score_val > 0 and score_val < 50 and fit in ("强匹配", "不匹配"):
-        analysis["role_fit"]["fit_level"] = "弱匹配" if fit == "不匹配" else "中等匹配"
+    elif 0 < score_val < 50 and fit in ("强匹配",):
+        analysis["role_fit"]["fit_level"] = "中等匹配"
+    elif 0 < score_val < 50 and fit in ("不匹配",):
+        analysis["role_fit"]["fit_level"] = "弱匹配"
     elif 50 <= score_val < 80 and fit in ("弱匹配", "不匹配"):
         analysis["role_fit"]["fit_level"] = "中等匹配"
     elif score_val >= 80 and fit != "强匹配":

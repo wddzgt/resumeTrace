@@ -1,6 +1,7 @@
 """Tests for report scoring and rendering."""
 import pytest
 from server.report.render import score_report, render_report, to_markdown
+from server.search.orchestrator import build_review_question, requirement_text
 from server.core.contracts import (
     CriterionCategory, CriterionResult, CriterionState, JobCriterion,
     ConditionNode, ResumeVersion, SourceSpan, ScopeRule, ReviewStatus,
@@ -191,3 +192,31 @@ class TestToMarkdown:
         md = to_markdown(report)
         assert "硬性要求" in md  # required → 硬性要求
         assert "满足" in md  # SUPPORTED → 满足
+
+
+def test_review_question_names_the_jd_line():
+    """待确认话术要点名这条岗位原文,不能吐内部条件标签。"""
+    from server.search.orchestrator import build_review_question
+    q = build_review_question(CriterionState.PARTIAL, "MySQL,有支付或风控系统开发经验优先")
+    assert "MySQL,有支付或风控系统开发经验优先" in q
+    assert "请确认候选人是否具备:" not in q
+    assert build_review_question(CriterionState.SUPPORTED, "x") is None
+
+
+def test_rendered_item_and_question_agree():
+    """左栏那条"要求"和 ❓ 里引用的必须是同一句原话,否则 HR 看着像两码事。"""
+    jd = "要求候选人有3年以上Java后端开发经验,熟悉Spring Boot和MySQL,有支付或风控系统开发经验优先"
+    crit = make_criterion("c03", "preferred")
+    crit.input_spans = [(36, 50)]
+    crit.expression = ConditionNode(predicate="业务领域开发经验", value="系统开发经验 风控系统")
+    res = make_result("c03", "PARTIAL")
+    res.review_question = build_review_question(CriterionState.PARTIAL,
+                                                requirement_text(crit, jd))
+    ver = ResumeVersion(candidate_id="CV05", dataset_id="ds", document_id="doc",
+                        source_sha256="sha", filename="CV05.pdf", ingested_at="",
+                        parser_version="v1", status="DONE")
+    rep = render_report(jd, "sha", [crit], [res], ver, {},
+                        score_report([crit], [res]))
+    item = rep["items"][0]
+    assert item["input_fragments"] == ["MySQL,有支付或风控系统开发经验优先"]
+    assert item["review_question"].startswith("「MySQL,有支付或风控系统开发经验优先」")

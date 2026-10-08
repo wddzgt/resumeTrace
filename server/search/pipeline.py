@@ -144,8 +144,18 @@ def scopes_compatible(scope_ids: list[str], scopes_by_id: dict, rule: ScopeRule)
     if rule == ScopeRule.WORK_PROJECT_CHAIN:
         if len(set(scope_ids)) == 1:
             return True
-        parents = {scopes_by_id[s].parent_scope_id for s in scope_ids if s in scopes_by_id}
-        return any(p in scope_ids for p in parents if p)
+        def _root(sid):
+            visited = {sid}
+            cur = sid
+            while cur in scopes_by_id and scopes_by_id[cur].parent_scope_id:
+                p = scopes_by_id[cur].parent_scope_id
+                if p in visited:
+                    break
+                visited.add(p)
+                cur = p
+            return cur
+        roots = {_root(s) for s in scope_ids if s in scopes_by_id}
+        return len(roots) == 1
     return False
 
 

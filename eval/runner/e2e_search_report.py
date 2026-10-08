@@ -128,7 +128,8 @@ def main():
                 consider = chs
             r, fs = judge_criterion(cc, tag, consider, scopes_by_id, llm_call, as_of,
                                     model_version=CHAT_MODEL,
-                                    scope_constraints=(args.scope_constraints == "on"))
+                                    scope_constraints=(args.scope_constraints == "on"),
+                                    jd_text=raw)
             results.append(r)
             facts.extend(fs)
         all_results.extend(results)

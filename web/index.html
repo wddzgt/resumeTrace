@@ -14,6 +14,7 @@ textarea{width:100%;height:90px;padding:10px;border:1px solid #ccc;border-radius
 button{background:var(--navy);color:#fff;border:0;border-radius:8px;padding:8px 18px;cursor:pointer;font-size:14px}
 button.ghost{background:#fff;color:var(--navy);border:1px solid var(--navy)}
 button.mini{background:#fff;color:var(--navy);border:1px solid #bcd;padding:2px 10px;font-size:12px;border-radius:6px}
+button.mini.on{background:var(--navy);color:#fff;border-color:var(--navy)}
 #cards{max-width:860px;margin:14px auto;padding:0 16px;display:grid;gap:10px}
 .card{background:#fff;border:1px solid #e2e6eb;border-radius:10px;padding:12px 16px;cursor:pointer}
 .card:hover{border-color:var(--navy)}
@@ -100,7 +101,7 @@ async function loadDirConfig(){
   }
 }
 loadDirConfig();
-function esc(s){return (s||"").replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]))}
+function esc(s){return (s||"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
 
 function verdictOf(rep){
   const req=rep.items.filter(i=>i.category==="required"||i.category==="search_intent");
@@ -118,15 +119,29 @@ function pointLine(it){
   const [w,cls]=WORD[it.state]||[it.state,"no"];
   const frag=(it.input_fragments||[])[0]||"(要求)";
   const idx=curRep.items.indexOf(it);
-  const cites=(it.citations||[]).slice(0,2)
-    .map(c=>`<button class="mini" onclick="showCite(${idx},${it.citations.indexOf(c)})">看原文 p${c.page}</button>`).join(" ");
+  const cites=(it.citations||[]).map((c,k)=>{
+    // 按钮上带一句片段:否则一排"看原文 p1"看不出各自指的是哪句
+    const t=((c.evidence_quote||c.quote||"").trim().slice(0,14))||"原文";
+    return `<button class="mini" data-i="${idx}" data-j="${k}" onclick="showCite(${idx},${k})">看原文 p${c.page}·${esc(t)}${(c.evidence_quote||c.quote||"").trim().length>14?"…":""}${c.scope_kind==="profile"?" (概要/清单)":""}</button>`}).join(" ");
   const ev=(it.citations||[])[0];
   const catLabel=CAT_LABEL[it.category]||it.category;
   return `<div class="point"><span class="st ${cls}">${w}</span> <span style="color:#888;font-size:12px">[${catLabel}]</span>
     <span class="jd">要求:${esc(frag)}</span>
-    ${ev?`<span class="jd" style="color:#234">简历:第 ${ev.page} 页 "${esc(ev.quote.slice(0,64))}${ev.quote.length>64?"…":""}"</span>`:'<span class="jd" style="color:#888">简历:未找到可定位原文</span>'}
+    <span class="jd" id="evq${idx}" style="color:${ev?"#234":"#888"}">${ev?citeText(ev):"简历:未找到可定位原文"}</span>
     ${cites}
     ${it.review_question?`<div class="q" style="margin-top:6px">❓ ${esc(it.review_question)}</div>`:""}</div>`;
+}
+function citeText(c){
+  const q=(c.evidence_quote||c.quote||"").trim();
+  return `简历:第 ${c.page} 页 "${esc(q.slice(0,64))}${q.length>64?"…":""}"`;
+}
+// 左栏那句话必须跟着右栏正在看的那处证据走,否则"要求/简历/框"三处各说各话
+function syncItemLine(i,j){
+  const el=document.getElementById("evq"+i), it=curRep.items&&curRep.items[i];
+  if(el&&it){ const c=(it.citations||[])[j];
+    el.innerHTML=c?citeText(c):"简历:未找到可定位原文";
+    el.style.color=c?"#234":"#888"; }
+  document.querySelectorAll('button[data-i="'+i+'"]').forEach(b=>b.classList.toggle("on",b.dataset.j===String(j)));
 }
 
 async function startSearch(){
@@ -272,9 +287,11 @@ async function rerunRefine(){
     timer=setInterval(()=>poll(r.search_id),4000); poll(r.search_id);
   }catch(e){ alert("重跑失败:"+e.message); }
 }
-function pngUrl(c){ return `${API}/v1/evidence/${c.span_id||"sp0"}/png?filename=${encodeURIComponent(curRep.candidate.filename||"")}`; }
+function pngUrl(c){ const q=c.evidence_quote?`&evidence_quote=${encodeURIComponent(c.evidence_quote)}`:"";
+  return `${API}/v1/evidence/${c.span_id||"sp0"}/png?filename=${encodeURIComponent(curRep.candidate.filename||"")}&report_id=${encodeURIComponent(curRep.report_id||"")}${q}`; }
 async function showCite(i,j){
   const c=curRep.items[i].citations[j];
+  syncItemLine(i,j);
   if(!curRep.candidate.filename){ right.innerHTML='<div class="hint">该报告缺少文件名,无法定位原文件</div>'; return; }
   right.innerHTML='<div class="spin">加载简历原页…</div>';
   try{
@@ -283,12 +300,16 @@ async function showCite(i,j){
     const blob=await r.blob();
     if(!blob.type.includes("image")) throw new Error("返回非图片");
     const img=new Image();
-    await new Promise((res,rej)=>{ img.onload=res; img.onerror=()=>rej(new Error("图片解码失败")); img.src=URL.createObjectURL(blob); });
+    const objUrl=URL.createObjectURL(blob);
+    await new Promise((res,rej)=>{ img.onload=res; img.onerror=()=>{URL.revokeObjectURL(objUrl);rej(new Error("图片解码失败"))}; img.src=objUrl; });
     img.style.maxWidth="100%"; img.style.boxShadow="0 2px 10px rgba(0,0,0,.4)"; img.style.margin="8px 0"; img.style.background="#fff";
     right.innerHTML="";
     const tag=document.createElement("div"); tag.className="hint";
-    tag.textContent=`第 ${c.page} 页 · ${c.label} · "${c.quote.slice(0,46)}…"`;
+    const eq=c.evidence_quote||c.quote;
+    const fromList=c.scope_kind && !["work","project","education"].includes(c.scope_kind)?" · 出自概要/技能清单(不算经历实证)":"";
+    tag.textContent=`第 ${c.page} 页 · ${c.label}${fromList} · "${eq.slice(0,46)}…"`;
     right.appendChild(tag); right.appendChild(img);
+    img.onload=()=>URL.revokeObjectURL(objUrl);
   }catch(e){
     right.innerHTML=`<div class="hint">原页加载失败:${esc(e.message)} <button class="mini" onclick="showCite(${i},${j})">重试</button></div>`;
   }
@@ -303,12 +324,14 @@ async function showResumePage(pageNum){
     const blob=await r.blob();
     if(!blob.type.includes("image")) throw new Error("返回非图片");
     const img=new Image();
-    await new Promise((res,rej)=>{ img.onload=res; img.onerror=()=>rej(new Error("图片解码失败")); img.src=URL.createObjectURL(blob); });
+    const objUrl=URL.createObjectURL(blob);
+    await new Promise((res,rej)=>{ img.onload=res; img.onerror=()=>{URL.revokeObjectURL(objUrl);rej(new Error("图片解码失败"))}; img.src=objUrl; });
     img.style.maxWidth="100%"; img.style.boxShadow="0 2px 10px rgba(0,0,0,.4)"; img.style.margin="8px 0"; img.style.background="#fff";
     right.innerHTML="";
     const tag=document.createElement("div"); tag.className="hint";
     tag.textContent=`第 ${pageNum} 页 · 简历原文`;
     right.appendChild(tag); right.appendChild(img);
+    img.onload=()=>URL.revokeObjectURL(objUrl);
   }catch(e){
     right.innerHTML=`<div class="hint">简历加载失败:${esc(e.message)}</div>`;
   }

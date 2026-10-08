@@ -97,6 +97,147 @@ def validate_offsets(spans: list[list[int]], raw_text: str) -> bool:
     return True
 
 
+# 模型给的字符偏移经常偏一两字:"熟悉Spring Boot和MySQL,有支付或风控系统开发经验优先"
+# 被切成了 ySQL,有支付或风控系统开 —— HR 看到的是 "MySQL" 变成 "ySQL"、句子断了腰。
+# 展示前把切断的边界往外推到小句边界(标点或 和/与/及 这类并列词)。
+_SNAP_STOP = set("，,。.、；;:：！!？?／/｜|（）()[]［］【】{}《》“”\"'‘’`·—–& \t\r\n")
+_SNAP_CONNECTORS = set("和与及或并")
+
+
+def _snap_is_ascii_word(ch: str) -> bool:
+    return bool(ch) and ch.isascii() and (ch.isalnum() or ch in "_+#")
+
+
+def _snap_is_cjk(ch: str) -> bool:
+    return "\u4e00" <= ch <= "\u9fff"
+
+
+def _snap_cut(text: str, i: int) -> bool:
+    """切点 i 是否把一个词从中间锯开(两侧同类字符连着)。"""
+    if i <= 0 or i >= len(text):
+        return False
+    a, b = text[i - 1], text[i]
+    return (_snap_is_ascii_word(a) and _snap_is_ascii_word(b)) or (_snap_is_cjk(a) and _snap_is_cjk(b))
+
+
+def _snap_walk(text: str, i: int, step: int) -> int:
+    j = i
+    while (step < 0 and j > 0) or (step > 0 and j < len(text)):
+        ch = text[j - 1] if step < 0 else text[j]
+        if ch in _SNAP_STOP or ch in _SNAP_CONNECTORS:
+            break
+        j += step
+    return j
+
+
+# 整行还原时会把"要求候选人/任职要求"这种套话一起带进来,和左栏的"要求:"标签撞成
+# "要求:要求候选人有3年经验";套话去掉,条件本身一个字不动。
+_JD_LEAD = re.compile(r"^(任职要求|岗位要求|职位要求|任职条件|要求候选人|希望候选人|"
+                      r"希望你|要求|希望)\s*[:：]?\s*")
+
+
+def _show(frag: str) -> str:
+    stripped = _JD_LEAD.sub("", frag.strip(), count=1)
+    return stripped if len(stripped) >= 3 else frag.strip()
+
+
+def snap_fragment(text: str, start: int, end: int, max_len: int = 44) -> str:
+    """把 [start,end) 还原成原文里那句完整小话;推完超长就不推,别把整段糊上去。"""
+    if not text:
+        return ""
+    s = max(0, min(int(start), len(text)))
+    e = max(s, min(int(end), len(text)))
+    if _snap_cut(text, s):
+        k = _snap_walk(text, s, -1)
+        if e - k <= max_len:
+            s = k
+    if _snap_cut(text, e):
+        k = _snap_walk(text, e, 1)
+        if k - s <= max_len:
+            e = k
+    # 首尾正好落在标点上("/规则引擎…""3年以上…."那种半句),说明上一句被切了一半
+    if s < e and text[s] in _SNAP_STOP:
+        k = _snap_walk(text, s, -1)
+        if e - k <= max_len:
+            s = k
+    if s < e and text[e - 1] in _SNAP_STOP:
+        k = _snap_walk(text, e, 1)
+        if k - s <= max_len:
+            e = k
+    # 一个 span 覆盖到相邻两条要求(JD 按行或 1) 2) 3) 编号分条):只留重叠最多的那条
+    covered = [(a, b) for a, b in _segments(text) if _overlap(a, b, s, e) > 0]
+    if len(covered) > 1:
+        a, b = max(covered, key=lambda seg: (_overlap(seg[0], seg[1], int(start), int(end)),
+                                             -seg[0]))
+        if b - a <= max_len:
+            return _show(text[a:b])
+    return _show(text[s:e])
+
+
+def _segments(text: str) -> list[tuple[int, int]]:
+    """岗位原文的"条目"区间:换行或 '1)' '2、' '3.' 这类编号都是一个条目的开头。"""
+    out, cur = [], 0
+    for m in re.finditer(r"[\n\r]+|(?<![\d])\d{1,2}\s*[)）.、]", text):
+        if m.start() > cur:
+            out.append((cur, m.start()))
+        cur = m.end()
+    if cur < len(text):
+        out.append((cur, len(text)))
+    return out or [(0, len(text))]
+
+
+def _overlap(a0: int, a1: int, b0: int, b1: int) -> int:
+    return min(a1, b1) - max(a0, b0)
+
+
+def snap_fragments(text: str, spans: list[tuple[int, int]]) -> list[str]:
+    return [f for f in (snap_fragment(text, s, e) for s, e in spans or []) if f]
+
+
+def locate_clause(text: str, needle: str) -> str:
+    """拿条件值回原文里找那句完整小话(偏移缺失时的兜底),空白差异不影响定位。"""
+    if not text or not needle:
+        return ""
+    pos, norm = [], []
+    for i, ch in enumerate(text):
+        if not ch.isspace():
+            norm.append(ch)
+            pos.append(i)
+    n = re.sub(r"\s+", "", needle)
+    if len(n) < 2:
+        return ""
+    k = "".join(norm).find(n)
+    if k < 0:
+        return ""
+    return snap_fragment(text, pos[k], pos[k + len(n) - 1] + 1)
+
+
+def requirement_fragments(c: JobCriterion, jd_text: str) -> list[str]:
+    """这条要求在岗位原文里的原话,给左栏和待确认话术共用。
+
+    模型给的字偏移常切在词中间(ySQL,有支付或风控系统开),先按边界吸附还原;
+    偏移整个没通过校验时按条件值回捞,总比对 HR 显示 "(要求)" 强。
+    """
+    if not jd_text:
+        return []
+    out = snap_fragments(jd_text, c.input_spans)
+    if out:
+        return out
+    needles = []
+    stack = [c.expression]
+    while stack:
+        node = stack.pop()
+        if node.op:
+            stack.extend(node.children)
+            continue
+        needles += [t for t in (node.value, node.predicate) if t]
+    for needle in sorted(dict.fromkeys(needles), key=len, reverse=True):
+        got = locate_clause(jd_text, needle)
+        if got and not any(got in f for f in out):
+            out.append(got)
+    return out
+
+
 def parse_conditions(raw_text: str, llm_call: Callable[[str, str], str],
                      input_type: str = "auto") -> tuple[list[JobCriterion], str, list[str]]:
     """返回 (criteria, query_sha256, warnings)。

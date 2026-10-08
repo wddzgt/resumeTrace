@@ -15,8 +15,8 @@ import re
 from typing import Callable, Optional
 
 from ..core.contracts import (AssertionType, CriterionCategory, CriterionResult,
-                              CriterionState, JobCriterion, ResumeFact, ScopeRule,
-                              _norm as _norm_ws)
+                              CriterionState, JobCriterion, ResumeFact, ScopeRule)
+from ..jd.parser import requirement_fragments
 from ..search.pipeline import (and_groups, build_result, criterion_queries,
                                duration_state, or_groups, parse_month,
                                scopes_compatible)
@@ -53,7 +53,8 @@ def judge_leaf(leaf_text: str, chunk_text: str, llm_call: Callable[[str, str], s
 def judge_criterion(c: JobCriterion, candidate_id: str, chunks: list[dict],
                     scopes_by_id: dict, llm_call: Callable[[str, str], str],
                     as_of: datetime.date, model_version: str = "",
-                    scope_constraints: bool = True) -> tuple[CriterionResult, list[ResumeFact]]:
+                    scope_constraints: bool = True,
+                    jd_text: str = "") -> tuple[CriterionResult, list[ResumeFact]]:
     """对单候选人单条件出 CriterionResult;chunks 为该候选人全部经历级 chunk。"""
     scope_chunks = [ck for ck in chunks if ck.get("resume_scope_id_kwd")]
     facts: list[ResumeFact] = []
@@ -74,6 +75,9 @@ def judge_criterion(c: JobCriterion, candidate_id: str, chunks: list[dict],
         # 词面重叠预排:每叶子最多送 2 个 chunk 给模型,控制调用量。
         # 中文按连续串+4-gram 滑窗计分,避免"风控平台"与"实时风控数据平台"零重叠。
         def _overlap_score(leaf: str, ct: str) -> int:
+            key = (leaf, ct)
+            if key in _overlap_cache:
+                return _overlap_cache[key]
             score = len(set(re.findall(r"[A-Za-z0-9+#]+", leaf))
                         & set(re.findall(r"[A-Za-z0-9+#]+", ct)))
             for run in re.findall(r"[一-鿿]+", leaf):
@@ -82,7 +86,10 @@ def judge_criterion(c: JobCriterion, candidate_id: str, chunks: list[dict],
                     continue
                 grams = {run[i:i + 2] for i in range(len(run) - 1)} if len(run) >= 2 else {run}
                 score += sum(1 for g in grams if g and g in ct)
+            _overlap_cache[key] = score
             return score
+
+        _overlap_cache: dict[tuple[str, str], int] = {}
 
         ranked = sorted(exp_src, key=lambda c2: _overlap_score(leaf_text, c2.get("content_with_weight") or ""), reverse=True)
         sent = 0
@@ -92,8 +99,9 @@ def judge_criterion(c: JobCriterion, candidate_id: str, chunks: list[dict],
                 continue
             sent += 1
             verdict = judge_leaf(leaf_text, text, llm_call)
-            state = CriterionState(verdict.get("state")) \
-                if verdict.get("state") in {s.value for s in CriterionState} else CriterionState.NEEDS_REVIEW
+            raw_state = verdict.get("state", "")
+            state = CriterionState(raw_state) \
+                if raw_state in {s.value for s in CriterionState} else CriterionState.NEEDS_REVIEW
             quote = verdict.get("quote", "")
             scope_id = ck.get("resume_scope_id_kwd")
             span_ids = ck.get("resume_source_ref_id_kwd") or []
@@ -172,8 +180,8 @@ def judge_criterion(c: JobCriterion, candidate_id: str, chunks: list[dict],
         return build_result(c, candidate_id, state, fact_ids,
                             span_ids if state in (CriterionState.SUPPORTED, CriterionState.PARTIAL) else [],
                             reason,
-                            question="请确认其经历分别对应哪些项目与月份"
-                            if state == CriterionState.NEEDS_REVIEW else None,
+                            question=build_review_question(
+                                state, requirement_text(c, jd_text), duration=True),
                             model_version=model_version), facts
 
     # 语义条件:OR 组任一组内 AND 叶子全支持;组内叶子须满足 scope_rule
@@ -208,6 +216,7 @@ def judge_criterion(c: JobCriterion, candidate_id: str, chunks: list[dict],
         group_states = [r[2] for r in res]
         group_scopes = [r[3] for r in res if r[2] in (CriterionState.SUPPORTED, CriterionState.PARTIAL)]
         group_spans = [r[4] for r in res if r[2] in (CriterionState.SUPPORTED, CriterionState.PARTIAL)]
+        group_ok = False
         if all(s == CriterionState.SUPPORTED for s in group_states) and group_states:
             sup_scopes = [s for s in group_scopes if s]
             # 同条件内 AND 叶子必须由同一经历支持(规格 7.3 同 scope 检查);
@@ -218,11 +227,14 @@ def judge_criterion(c: JobCriterion, candidate_id: str, chunks: list[dict],
             elif scopes_compatible(sup_scopes, scopes_by_id, c.scope_rule):
                 satisfied_groups += 1
                 used_scopes += group_scopes
-                used_spans += [s for s in group_spans if s]
+                group_ok = True
             else:
                 partial_any = True  # 证据存在但关系约束不满足,不成立
         elif any(s in (CriterionState.SUPPORTED, CriterionState.PARTIAL) for s in group_states):
             partial_any = True
+        # 部分成立时也要保留已定位原文:否则"未找到可定位原文",HR 无法核对模型判断
+        if group_ok or partial_any:
+            used_spans += [s for s in group_spans if s]
         if any(s == CriterionState.NEEDS_REVIEW for s in group_states):
             need_review_any = True
 
@@ -244,26 +256,56 @@ def judge_criterion(c: JobCriterion, candidate_id: str, chunks: list[dict],
         state = CriterionState.NOT_EVIDENCED
         reason = "no_evidence_in_resume"
 
-    question = None
-    if state in (CriterionState.PARTIAL, CriterionState.NOT_EVIDENCED):
-        question = f"请确认候选人是否具备:{_brief(c)};如具备请提供对应项目与时间"
-    elif state == CriterionState.NEEDS_REVIEW:
-        question = f"证据定位或引用审计未通过,请人工复核:{_brief(c)}"
+    question = build_review_question(state, requirement_text(c, jd_text))
     logger.debug("judge_criterion: candidate=%s criterion=%s state=%s reason=%s",
                 candidate_id, c.criterion_id, state.value, reason)
     return (build_result(c, candidate_id, state,
                          [f.fact_id for f in facts],
-                         [s for s in used_spans if s], reason,
+                         sorted({s for s in used_spans if s}), reason,
                          question=question, model_version=model_version), facts)
 
 
-def _brief(c: JobCriterion) -> str:
-    leaves = []
-    stack = [c.expression]
+def _leaves(node) -> list:
+    out, stack = [], [node]
     while stack:
         n = stack.pop()
         if n.op:
             stack.extend(n.children)
         else:
-            leaves.append(" ".join(p for p in (n.predicate, n.value) if p))
-    return " 且 ".join(leaves)[:80]
+            out.append(n)
+    return out
+
+
+def _brief(c: JobCriterion) -> str:
+    """内部条件串(predicate + value 拼接),只用于送模型的领域判定。"""
+    return " 且 ".join(" ".join(p for p in (n.predicate, n.value) if p)
+                       for n in _leaves(c.expression))[:80]
+
+
+def requirement_text(c: JobCriterion, jd_text: str) -> str:
+    """给 HR 看的那句岗位原文。
+
+    表达式叶子是模型自填的标签(见过 "业务领域开发经验 系统开发经验"),拿去问候选人
+    只会让人觉得和这条要求无关;所以待确认话术一律点名 JD 原文,原文缺失才回退叶子。
+    """
+    frags = requirement_fragments(c, jd_text)
+    return "、".join(frags) if frags else _brief(c)
+
+
+def build_review_question(state: CriterionState, req_text: str,
+                          duration: bool = False) -> Optional[str]:
+    """待确认话术:点名这条岗位原文缺什么。
+
+    之前直接拼表达式叶子,HR 看到的是"业务领域开发经验 系统开发经验 风控系统 且 …",
+    跟左栏那条要求对不上,像是系统在自说自话(规格 8:不得生成与输入无关的泛化面试题)。
+    """
+    if state == CriterionState.PARTIAL:
+        return (f"「{req_text}」只找到部分证据,没看到完整对应的经历;"
+                f"面试时请候选人说明做过的相关项目与起止时间")
+    if state == CriterionState.NOT_EVIDENCED:
+        return f"简历里没看到「{req_text}」的经历,需当面确认候选人是否具备"
+    if state == CriterionState.NEEDS_REVIEW:
+        if duration:
+            return f"「{req_text}」的工作起止时间没写全,算不出年限,请确认对应经历与时间段"
+        return f"「{req_text}」的证据没能定位回简历原文,请人工复核对应段落"
+    return None

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -28,12 +29,18 @@ CREATE TABLE IF NOT EXISTS resume_versions(
   source_sha256 TEXT, filename TEXT, ingested_at TEXT, parser_version TEXT, status TEXT);
 """
 
+_local = threading.local()
+
 
 def conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(DB_PATH)
+    c = getattr(_local, "conn", None)
+    if c is not None:
+        return c
+    c = sqlite3.connect(DB_PATH, check_same_thread=False)
     c.row_factory = sqlite3.Row
     c.executescript(SCHEMA)
+    _local.conn = c
     return c
 
 

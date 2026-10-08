@@ -7,3 +7,4 @@ pyyaml>=6.0.1
 pypdfium2>=4.25.0
 Pillow>=10.1.0
 pypdf>=3.0.0
+pdfplumber>=0.11.0

@@ -21,7 +21,6 @@ from ..search.service import run_search
 logger = logging.getLogger("resumetrace.api")
 
 CFG = yaml.safe_load((Path(__file__).resolve().parents[2] / "configs" / "resumetrace.yaml").read_text())
-RAGFLOW = yaml.safe_load((Path(__file__).resolve().parents[2] / "configs" / "ragflow.yaml.example").read_text())
 BASE = os.environ.get("RAGFLOW_BASE_URL", "http://localhost:9380")
 RF_KEY = os.environ.get("RAGFLOW_API_KEY", "")
 TENANT = os.environ.get("RAGFLOW_TENANT_ID", "0d2a2ffab98311f19fb9fb76fa95440b")
@@ -29,10 +28,16 @@ CHAT_MODEL = os.environ.get("RAGFLOW_CHAT_MODEL", "deepseek-v4.1-flash")
 PROVIDER = os.environ.get("RAGFLOW_PROVIDER", "OpenAI-API-Compatible")
 INSTANCE = os.environ.get("RAGFLOW_INSTANCE", "dashscope")
 TOKEN = os.environ.get("RESUMETRACE_TOKEN", "local-dev")
+if TOKEN == "local-dev":
+    import warnings as _w
+    _w.warn("RESUMETRACE_TOKEN 使用默认值 local-dev,生产环境请设置环境变量", stacklevel=2)
+
+_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 
 app = FastAPI(title="ResumeTrace")
 _imports: dict[str, dict] = {}
 _search_progress: dict[str, dict] = {}
+_lock = threading.Lock()
 
 
 def _auth(request: Request):
@@ -83,7 +88,7 @@ def _llm_call(system: str, user: str) -> str:
                 logger.warning("LLM returned error (attempt %d): %s", attempt + 1, last)
                 continue
             return ans
-        except requests.RequestException as e:
+        except (requests.RequestException, ValueError) as e:
             elapsed_ms = (time.monotonic() - t0) * 1000
             last = str(e)[:160]
             logger.warning("LLM call exception (attempt %d): %s (%.0fms)", attempt + 1, last, elapsed_ms)
@@ -146,6 +151,11 @@ class NoteReq(BaseModel):
     search_id: str | None = None
 
 
+def _validate_id(value: str, field: str = "id"):
+    if not value or not _ID_RE.match(value):
+        _err("ARG", f"{field} 格式非法:只允许字母数字下划线连字符,1-128字符")
+
+
 def _safe_dir(path: str) -> Path:
     allowed = [Path(p).expanduser().resolve() for p in CFG["allowed_import_dirs"]]
     p = Path(path).expanduser().resolve()
@@ -197,14 +207,20 @@ def library_import(req: ImportReq, request: Request):
                     _imports[task_id]["files"].append({"name": f.name, "sha256": sha,
                                                        "status": "FAIL", "reason": str(e)[:200]})
             doc_ids = [x["document_id"] for x in _imports[task_id]["files"] if x["status"] == "OK"]
+            chunk_ok = False
             if doc_ids:
                 try:
-                    requests.post(f"{BASE}/api/v1/datasets/{req.dataset_id}/chunks",
+                    cr = requests.post(f"{BASE}/api/v1/datasets/{req.dataset_id}/chunks",
                                   headers={**_rf_headers(), "Content-Type": "application/json"},
                                   json={"document_ids": doc_ids}, timeout=120)
+                    chunk_ok = cr.status_code == 200
                 except Exception as e:
                     logger.warning("Chunk trigger failed for task %s: %s", task_id, e)
-            _imports[task_id]["status"] = "done"
+            failed_count = sum(1 for x in _imports[task_id]["files"] if x["status"] == "FAIL")
+            if failed_count or not chunk_ok:
+                _imports[task_id]["status"] = "done_with_errors"
+            else:
+                _imports[task_id]["status"] = "done"
         except Exception as e:
             logger.exception("Import thread crashed: task=%s", task_id)
             _imports[task_id]["status"] = f"failed: {e}"
@@ -291,7 +307,6 @@ def _start_search_thread(sid, dataset_id, qtext, scope_constraints, limit, crite
 @app.get("/v1/searches")
 def list_searches(request: Request):
     _auth(request)
-    import sqlite3
     from ..db.store import conn as _conn
     with _conn() as c:
         rows = c.execute("SELECT s.search_id,s.status,s.created_at,s.query_text,"
@@ -367,6 +382,7 @@ def get_report(rid: str , request: Request):
         _err("NOT_FOUND", "报告不存在", status=404)
     import json as _json
     rep = _json.loads(row["report_json"])
+    rep.setdefault("report_id", rid)   # 前端据此精确取该报告的证据(跨报告 span_id 会重名)
     if row["source_deleted"]:
         rep["source_status"] = "来源已删除,报告不可再验证"
     return rep
@@ -376,6 +392,8 @@ def get_report(rid: str , request: Request):
 def get_evidence(span_ref: str, dataset_id: str, document_id: str, request: Request):
     """span_ref 形如 docid:spN;返回受控下载地址+页码+矩形+引文+版本哈希。"""
     _auth(request)
+    _validate_id(dataset_id, "dataset_id")
+    _validate_id(document_id, "document_id")
     from ..core.evidence import es_chunks_for_document, chunks_to_evidence
     doc = requests.get(f"{BASE}/api/v1/datasets/{dataset_id}/documents/{document_id}",
                        headers=_rf_headers(), timeout=120)
@@ -396,6 +414,8 @@ def get_evidence(span_ref: str, dataset_id: str, document_id: str, request: Requ
 def evidence_pdf(span_ref: str, dataset_id: str, document_id: str, request: Request):
     """受控 PDF 代理:RAGFlow key 只存服务端,浏览器不接触(规格第 9 节)。"""
     _auth(request)
+    _validate_id(dataset_id, "dataset_id")
+    _validate_id(document_id, "document_id")
     r = requests.get(f"{BASE}/api/v1/datasets/{dataset_id}/documents/{document_id}",
                      headers=_rf_headers(), timeout=120)
     if r.status_code != 200:
@@ -406,12 +426,28 @@ def evidence_pdf(span_ref: str, dataset_id: str, document_id: str, request: Requ
                     headers={"Content-Disposition": f'inline; filename="{safe_name}.pdf"'})
 
 
+def _expr_text(node) -> str:
+    """条件表达式树 → 扁平文字,给证据定位当关键词来源。"""
+    if not isinstance(node, dict):
+        return ""
+    parts = [node.get("predicate") or "", node.get("value") or ""]
+    parts += [_expr_text(ch) for ch in (node.get("children") or [])]
+    return " ".join(p for p in parts if p)
+
+
 @app.get("/v1/evidence/{span_ref}/png")
 def evidence_png(span_ref: str, request: Request, dataset_id: str = None,
-                 document_id: str = None, filename: str = None):
+                 document_id: str = None, filename: str = None, report_id: str = None,
+                 evidence_quote: str = None):
     """服务端渲染证据页 PNG(pypdfium2 + 高亮矩形),浏览器零字体依赖。带磁盘缓存。
     优先用本地 PDF 文件,回退 RAGFlow 下载。"""
     _auth(request)
+    if dataset_id:
+        _validate_id(dataset_id, "dataset_id")
+    if document_id:
+        _validate_id(document_id, "document_id")
+    if report_id:
+        _validate_id(report_id, "report_id")
     import hashlib
     import pypdfium2 as pdfium
     from PIL import Image, ImageDraw
@@ -421,44 +457,60 @@ def evidence_png(span_ref: str, request: Request, dataset_id: str = None,
     cache.mkdir(parents=True, exist_ok=True)
 
     span_id = span_ref.split(":")[-1]
+    like_pat = f'%"span_id": "{span_id}"%'
     with store.conn() as c:
-        if dataset_id:
+        # span_id 只在单份简历内唯一:优先按打开中的 report_id 精确取,否则才全文回退
+        if report_id:
+            row = c.execute("SELECT report_json FROM reports WHERE report_id=? LIMIT 1",
+                            (report_id,)).fetchone()
+            if not row or f'"span_id": "{span_id}"' not in (row["report_json"] or ""):
+                row = c.execute(
+                    "SELECT report_json FROM reports WHERE report_json LIKE ? LIMIT 1",
+                    (like_pat,)).fetchone()
+        elif dataset_id:
             row = c.execute(
                 "SELECT report_json FROM reports WHERE search_id IN "
                 "(SELECT search_id FROM searches WHERE dataset_id=?) "
                 "AND report_json LIKE ? LIMIT 1",
-                (dataset_id, f'%"span_id": "{span_id}"%')
+                (dataset_id, like_pat)
             ).fetchone()
         elif filename:
             row = c.execute(
                 "SELECT report_json FROM reports WHERE report_json LIKE ? "
                 "AND report_json LIKE ? LIMIT 1",
-                (f'%"span_id": "{span_id}"%', f'%"filename": "{filename}"%')
+                (like_pat, f'%"filename": "{filename}"%')
             ).fetchone()
         else:
             row = c.execute(
                 "SELECT report_json FROM reports WHERE report_json LIKE ? LIMIT 1",
-                (f'%"span_id": "{span_id}"%',)
+                (like_pat,)
             ).fetchone()
     if not row:
         _err("NOT_FOUND", "证据不存在", status=404)
 
     import json as _json
     rep = _json.loads(row["report_json"])
-    sp_data = None
-    for item in rep.get("items", []):
-        for ci in item.get("citations", []):
-            if ci.get("span_id") == span_id:
-                sp_data = ci
-                break
-        if sp_data:
-            break
-    if not sp_data:
+    # 同一 span 可被不同条件引用不同句子:带 evidence_quote 时精确取那一条
+    cands = [(it, ci) for it in rep.get("items", []) for ci in it.get("citations", [])
+             if ci.get("span_id") == span_id]
+    pair = next((p for p in cands
+                 if evidence_quote and (p[1].get("evidence_quote") or "") == evidence_quote),
+                cands[0] if cands else None)
+    if not pair:
         _err("NOT_FOUND", "证据不存在", status=404)
+    item_data, sp_data = pair
+    # 这条引用服务于哪条要求:整段坐标收窄到句子时,只有条件里的关键词能决定是哪句
+    req_text = " ".join(item_data.get("input_fragments") or []).strip()
+    if not req_text:
+        req_text = " ".join(_expr_text(c.get("expression"))
+                            for c in rep.get("criteria", [])
+                            if c.get("criterion_id") == item_data.get("criterion_id"))
 
     page_index = sp_data["page"] - 1
     rects = sp_data["rects"]
-    quote_hash = hashlib.sha256((sp_data.get("quote") or "").encode()).hexdigest()
+    cite_quote = (sp_data.get("evidence_quote") or "").strip()
+    quote_hash = hashlib.sha256(
+        f"{sp_data.get('quote') or ''}|{cite_quote}|{req_text}".encode()).hexdigest()
     cand_filename = filename or rep.get("candidate", {}).get("filename", "")
     cache_key_src = f"{cand_filename}|{page_index}|{quote_hash}"
     key = hashlib.sha256(cache_key_src.encode()).hexdigest()[:16]
@@ -481,17 +533,49 @@ def evidence_png(span_ref: str, request: Request, dataset_id: str = None,
             _err("NO_PDF", f"找不到 PDF 文件: {cand_filename}", status=502)
 
         pdf = pdfium.PdfDocument(io.BytesIO(pdf_binary))
-        page = pdf[page_index]
-        img = page.render(scale=2.0).to_pil().convert("RGB")
-        logger.info(f"Rendering evidence PNG: img_size={img.size}, page_index={page_index}, num_rects={len(rects)}")
-        d = ImageDraw.Draw(img, "RGBA")
-        for i, rc in enumerate(rects):
-            x0, y0, x1, y1 = rc["x0"] * 2, rc["top"] * 2, rc["x1"] * 2, rc["bottom"] * 2
-            logger.info(f"  rect[{i}]: pdf=({rc['x0']},{rc['top']},{rc['x1']},{rc['bottom']}) -> pixels=({x0},{y0},{x1},{y1})")
-            d.rectangle([x0, y0, x1, y1], fill=(255, 220, 0, 80), outline=(200, 40, 40, 240), width=3)
-        img.save(png, "PNG")
+        try:
+            if page_index < 0 or page_index >= len(pdf):
+                _err("ARG", f"页码索引 {page_index} 超出范围(共 {len(pdf)} 页)", status=400)
+            page = pdf[page_index]
+            img = page.render(scale=2.0).to_pil().convert("RGB")
+            sx = img.size[0] / page.get_width()
+            sy = img.size[1] / page.get_height()
+            page_height = page.get_height()
+            # 证据框优先落到"真正支撑结论的那一句":RAGFlow 只给经历抬头存了坐标,
+            # 正文句(如 · 后端技术|Spring Boot…)靠 pdfplumber 现算行矩形
+            draw_rects = rects
+            from ..core.evidence import line_rects_for_quote, narrow_rects_to_keywords
+            if cite_quote and cite_quote != (sp_data.get("quote") or ""):
+                located = line_rects_for_quote(pdf_binary, page_index, cite_quote)
+                if located:
+                    draw_rects = located
+                logger.info("Evidence line locate: span=%s located=%d whole=%d quote=%.40s",
+                            span_id, len(located), len(rects), cite_quote)
+            else:
+                # 模型没摘抄到具体句子时,span 坐标是**整段**(抬头+正文全框住),满屏红框等于没框
+                narrowed = narrow_rects_to_keywords(pdf_binary, page_index, rects, req_text)
+                if narrowed:
+                    draw_rects = narrowed
+                logger.info("Evidence rect narrow: span=%s narrowed=%d whole=%d req=%.40s",
+                            span_id, len(narrowed), len(rects), req_text)
+            logger.info(f"Rendering evidence PNG: img_size={img.size}, page_index={page_index}, num_rects={len(draw_rects)}, scale=({sx:.4f},{sy:.4f})")
+            d = ImageDraw.Draw(img, "RGBA")
+            for i, rc in enumerate(draw_rects):
+                if rc.get("page", page_index) != page_index:
+                    continue
+                # RAGFlow pdfplumber 返回图像坐标 (左上角原点,y 向下),单位 PDF points
+                # 直接用 scale 转为像素,无需翻转
+                x0 = rc["x0"] * sx
+                y0 = rc["top"] * sy
+                x1 = rc["x1"] * sx
+                y1 = rc["bottom"] * sy
+                logger.info(f"  rect[{i}]: pdf=({rc['x0']},{rc['top']},{rc['x1']},{rc['bottom']}) -> pixels=({x0},{y0},{x1},{y1})")
+                d.rectangle([x0, y0, x1, y1], fill=(255, 220, 0, 80), outline=(200, 40, 40, 240), width=3)
+            img.save(png, "PNG")
+        finally:
+            pdf.close()
     return _Resp(content=png.read_bytes(), media_type="image/png",
-                 headers={"Cache-Control": "public, max-age=86400"})
+                 headers={"Cache-Control": "no-store"})
 
 
 @app.get("/v1/resume/page/png")
@@ -522,13 +606,16 @@ def resume_page_png(filename: str, page: int = 1, request: Request = None):
             _err("NO_PDF", f"找不到 PDF 文件：{filename}", status=502)
 
         pdf = pdfium.PdfDocument(io.BytesIO(pdf_binary))
-        if page < 1 or page > len(pdf):
-            _err("ARG", f"页码 {page} 超出范围(共 {len(pdf)} 页)", status=400)
-        page_obj = pdf[page - 1]
-        img = page_obj.render(scale=2.0).to_pil().convert("RGB")
-        img.save(png, "PNG")
+        try:
+            if page < 1 or page > len(pdf):
+                _err("ARG", f"页码 {page} 超出范围(共 {len(pdf)} 页)", status=400)
+            page_obj = pdf[page - 1]
+            img = page_obj.render(scale=2.0).to_pil().convert("RGB")
+            img.save(png, "PNG")
+        finally:
+            pdf.close()
     return _Resp(content=png.read_bytes(), media_type="image/png",
-                 headers={"Cache-Control": "public, max-age=86400"})
+                 headers={"Cache-Control": "no-store"})
 
 
 @app.post("/v1/candidates/{candidate_id}/notes")

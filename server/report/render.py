@@ -13,8 +13,9 @@ import datetime
 import os
 from typing import Optional
 
-from ..core.contracts import (CriterionCategory, CriterionResult, CriterionState,
-                              JobCriterion, ResumeVersion, SourceSpan)
+from ..core.contracts import (AssertionType, CriterionCategory, CriterionResult,
+                              CriterionState, JobCriterion, ResumeVersion, SourceSpan)
+from ..jd.parser import requirement_fragments
 
 _STATE_SCORE = {
     CriterionState.SUPPORTED: 1.0,
@@ -69,29 +70,55 @@ def score_report(criteria: list[JobCriterion], results: list[CriterionResult],
 def render_report(query_text: str, query_sha: str, criteria: list[JobCriterion],
                   results: list[CriterionResult], version: ResumeVersion,
                   spans: dict[str, SourceSpan], score: dict,
-                  notes: Optional[list[dict]] = None) -> dict:
+                  notes: Optional[list[dict]] = None,
+                  facts: Optional[list] = None,
+                  scopes: Optional[dict] = None) -> dict:
     by_cid = {r.criterion_id: r for r in results}
+    # span → 模型逐字摘抄的那句话:RAGFlow 只给经历抬头存了坐标,正文句要靠它定位
+    quote_by_span, kind_by_span = {}, {}
+    for f in (facts or []):
+        # 只用语义类 fact 的逐字引文做行定位;年限类 fact 的 value 是日期区间(算出来的),不是原文
+        if f.value and f.assertion_type == AssertionType.SEMANTIC:
+            for sid in f.source_span_ids:
+                quote_by_span.setdefault(sid, f.value)
+    for sc in (scopes or {}).values():
+        for sid in sc.source_span_ids:
+            kind_by_span.setdefault(sid, sc.kind.value)
     items = []
     for c in criteria:
         r = by_cid.get(c.criterion_id)
         cites = []
         if r:
+            seen_geom = set()
             for sid in r.source_span_ids:
                 sp = spans.get(sid)
                 if not sp:
                     continue
+                # 一个 chunk 会拆出两个 span 指向同一块坐标(sp4/sp5),不去重就是 6 个
+                # "看原文"按钮其实只有 3 处地方,HR 只会以为系统在乱引
+                geom = (sp.page_index, sp.line_start, sp.line_end,
+                        tuple(round(v) for x in sp.rects
+                              for v in (x.x0, x.top, x.x1, x.bottom)))
+                if geom in seen_geom:
+                    continue
+                seen_geom.add(geom)
                 cites.append(dict(span_id=sid, page=sp.page_index + 1,
                                   rects=[r_.model_dump() for r_ in sp.rects],
                                   quote=sp.quote, extraction_mode=sp.extraction_mode,
                                   status=sp.status,
+                                  evidence_quote=quote_by_span.get(sid) or sp.quote,
+                                  scope_kind=kind_by_span.get(sid) or "unknown",
                                   download_url=f"{os.environ.get('RAGFLOW_BASE_URL', 'http://localhost:9380')}"
                                                f"/api/v1/datasets/{version.dataset_id}/documents/{version.document_id}",
                                   label="OCR 文本(扫描件)" if sp.extraction_mode == "OCR" else "原文"))
+            # 经历类证据排前:技能清单上的声称只作兜底,不该当头一条给 HR 看
+            cites.sort(key=lambda ci: 0 if ci["scope_kind"] in
+                      ("work", "project", "education") else 1)
         items.append(dict(
             criterion_id=c.criterion_id,
             category=c.category.value,
             review_status=c.review_status.value,
-            input_fragments=[query_text[s:e] for s, e in c.input_spans],
+            input_fragments=requirement_fragments(c, query_text),
             state=r.state.value if r else "NOT_EVIDENCED",
             reason=r.reason_code if r else "",
             citations=cites,
@@ -101,7 +128,7 @@ def render_report(query_text: str, query_sha: str, criteria: list[JobCriterion],
     questions = [dict(criterion_id=i["criterion_id"], question=i["review_question"])
                  for i in items if i["review_question"]]
     return dict(
-        generated_at=datetime.datetime.now().isoformat(timespec="seconds"),
+        generated_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
         query=dict(raw_text=query_text, sha256=query_sha,
                    criteria_version="v1"),
         criteria=[c.model_dump() for c in criteria],
